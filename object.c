@@ -193,38 +193,68 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
     char path[512];
     object_path(id, path, sizeof(path));
 
-    // 1. Open and read entire file
+    // 1. Open file
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
+
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
+
     uint8_t *buf = malloc(fsize);
-    if (!buf) { fclose(f); return -1; }
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+
     fread(buf, 1, fsize, f);
     fclose(f);
 
-    // 2. Verify integrity: recompute hash of the file contents
+    // 2. Verify hash
     ObjectID computed;
     compute_hash(buf, fsize, &computed);
-    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) { free(buf); return -1; }
+    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) {
+        free(buf);
+        return -1;
+    }
 
-    // 3. Find the \0 separator between header and data
+    // 3. Find header-data separator
     uint8_t *null_pos = memchr(buf, '\0', fsize);
-    if (!null_pos) { free(buf); return -1; }
+    if (!null_pos) {
+        free(buf);
+        return -1;
+    }
 
-    // 4. Parse type from header ("blob 42")
-    if      (strncmp((char*)buf, "blob",   4) == 0) *type_out = OBJ_BLOB;
-    else if (strncmp((char*)buf, "tree",   4) == 0) *type_out = OBJ_TREE;
+    // 4. Parse type
+    if      (strncmp((char*)buf, "blob", 4) == 0) *type_out = OBJ_BLOB;
+    else if (strncmp((char*)buf, "tree", 4) == 0) *type_out = OBJ_TREE;
     else if (strncmp((char*)buf, "commit", 6) == 0) *type_out = OBJ_COMMIT;
-    else { free(buf); return -1; }
+    else {
+        free(buf);
+        return -1;
+    }
 
-    // 5. Extract data after the \0
+    // 5. Parse size (IMPORTANT FIX)
+    size_t expected_size;
+    sscanf((char*)buf, "%*s %zu", &expected_size);
+
+    // 6. Extract data
     uint8_t *data_start = null_pos + 1;
-    *len_out = fsize - (data_start - buf);
-    *data_out = malloc(*len_out);
-    if (!*data_out) { free(buf); return -1; }
-    memcpy(*data_out, data_start, *len_out);
+    size_t actual_size = fsize - (data_start - buf);
+
+    if (actual_size != expected_size) {
+        free(buf);
+        return -1;
+    }
+
+    *len_out = actual_size;
+    *data_out = malloc(actual_size);
+    if (!*data_out) {
+        free(buf);
+        return -1;
+    }
+
+    memcpy(*data_out, data_start, actual_size);
 
     free(buf);
     return 0;
