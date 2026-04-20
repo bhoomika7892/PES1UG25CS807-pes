@@ -94,9 +94,58 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    // 1. Build the type string
+    const char *type_str = (type == OBJ_BLOB) ? "blob" :
+                           (type == OBJ_TREE) ? "tree" : "commit";
+
+    // 2. Build the header: "blob 42\0"
+    char header[64];
+    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1; // +1 for \0
+
+    // 3. Combine header + data into one buffer
+    size_t total = hlen + len;
+    uint8_t *full = malloc(total);
+    if (!full) return -1;
+    memcpy(full, header, hlen);
+    memcpy(full + hlen, data, len);
+
+    // 4. Compute SHA-256 of the full buffer
+    compute_hash(full, total, id_out);
+
+    // 5. Deduplication: if already exists, done
+    if (object_exists(id_out)) { free(full); return 0; }
+
+    // 6. Get the target path and create shard directory
+    char path[512];
+    object_path(id_out, path, sizeof(path));
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/%.2s", OBJECTS_DIR,
+             /* first 2 chars of hex */ (char[3]){0}); // see below
+    // Better: extract dir from path
+    char dir2[512];
+    strncpy(dir2, path, sizeof(dir2));
+    char *slash = strrchr(dir2, '/');
+    if (slash) *slash = '\0';
+    mkdir(dir2, 0755); // ok if already exists
+
+    // 7. Write to temp file, fsync, rename
+    char tmp[520];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) { free(full); return -1; }
+    write(fd, full, total);
+    fsync(fd);
+    close(fd);
+    free(full);
+
+    // 8. Atomic rename
+    if (rename(tmp, path) != 0) return -1;
+
+    // 9. fsync the directory to persist the rename
+    int dfd = open(dir2, O_RDONLY);
+    if (dfd >= 0) { fsync(dfd); close(dfd); }
+
+    return 0;
 }
 
 // Read an object from the store.
@@ -122,7 +171,42 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    // 1. Open and read entire file
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = malloc(fsize);
+    if (!buf) { fclose(f); return -1; }
+    fread(buf, 1, fsize, f);
+    fclose(f);
+
+    // 2. Verify integrity: recompute hash of the file contents
+    ObjectID computed;
+    compute_hash(buf, fsize, &computed);
+    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) { free(buf); return -1; }
+
+    // 3. Find the \0 separator between header and data
+    uint8_t *null_pos = memchr(buf, '\0', fsize);
+    if (!null_pos) { free(buf); return -1; }
+
+    // 4. Parse type from header ("blob 42")
+    if      (strncmp((char*)buf, "blob",   4) == 0) *type_out = OBJ_BLOB;
+    else if (strncmp((char*)buf, "tree",   4) == 0) *type_out = OBJ_TREE;
+    else if (strncmp((char*)buf, "commit", 6) == 0) *type_out = OBJ_COMMIT;
+    else { free(buf); return -1; }
+
+    // 5. Extract data after the \0
+    uint8_t *data_start = null_pos + 1;
+    *len_out = fsize - (data_start - buf);
+    *data_out = malloc(*len_out);
+    if (!*data_out) { free(buf); return -1; }
+    memcpy(*data_out, data_start, *len_out);
+
+    free(buf);
+    return 0;
 }
