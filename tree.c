@@ -10,6 +10,7 @@
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 #include "tree.h"
+#include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,10 +129,95 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - tree_serialize  : convert your populated Tree struct into a binary buffer
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
-// Returns 0 on success, -1 on error.
-int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+// Returns 0 on success, -1 on error
+
+// Forward declaration for recursion
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out);
+
+// Recursive helper: given an array of IndexEntry pointers at a given "depth" prefix,
+// build a tree and write it. Returns the ObjectID of the written tree.
+static int write_tree_level(IndexEntry **entries, int count, int depth, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
+    int i = 0;
+
+    while (i < count) {
+        // Find the component at this depth level
+        char *path = entries[i]->path;
+
+        // Count how many '/' are before depth-th segment
+        const char *p = path;
+        for (int d = 0; d < depth; d++) {
+            p = strchr(p, '/');
+            if (!p) break;
+            p++;
+        }
+        // p now points to the component at this depth
+
+        char *slash = strchr(p, '/');
+
+        if (!slash) {
+            // It's a plain file at this level
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = entries[i]->mode;
+            e->hash = entries[i]->hash;
+            strncpy(e->name, p, sizeof(e->name)-1);
+            i++;
+        } else {
+            // It's a directory — find all entries with the same directory name
+            char dirname[256];
+            int dlen = slash - p;
+            strncpy(dirname, p, dlen);
+            dirname[dlen] = '\0';
+
+            // Collect all entries in this subdirectory
+            int j = i;
+            while (j < count) {
+                const char *pp = entries[j]->path;
+                for (int d = 0; d < depth; d++) {
+                    pp = strchr(pp, '/');
+                    if (pp) pp++;
+                }
+                char *sl = strchr(pp, '/');
+                if (!sl) break;
+                int dl = sl - pp;
+                if (dl != dlen || strncmp(pp, dirname, dlen) != 0) break;
+                j++;
+            }
+
+            // Recursively build the subtree
+            ObjectID subtree_id;
+            if (write_tree_level(entries + i, j - i, depth + 1, &subtree_id) != 0)
+                return -1;
+
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = 0040000;
+            e->hash = subtree_id;
+            strncpy(e->name, dirname, sizeof(e->name)-1);
+            i = j;
+        }
+    }
+
+    void *data;
+    size_t len;
+    if (tree_serialize(&tree, &data, &len) != 0) return -1;
+    int rc = object_write(OBJ_TREE, data, len, id_out);
+    free(data);
+    return rc;
 }
+
+int tree_from_index(ObjectID *id_out) {
+    Index index;
+    if (index_load(&index) != 0) return -1;
+    if (index.count == 0) return -1;
+
+    // Sort entries by path
+    IndexEntry *ptrs[MAX_INDEX_ENTRIES];
+    for (int i = 0; i < index.count; i++) ptrs[i] = &index.entries[i];
+    // They're already sorted by index_save, but just to be safe:
+    // qsort is optional here since index is pre-sorted
+
+    return write_tree_level(ptrs, index.count, 0, id_out);
+}
+
