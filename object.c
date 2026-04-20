@@ -94,56 +94,75 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // 1. Build the type string
+    // 1. Type string
     const char *type_str = (type == OBJ_BLOB) ? "blob" :
                            (type == OBJ_TREE) ? "tree" : "commit";
 
-    // 2. Build the header: "blob 42\0"
+    // 2. Build header: "blob 5\0"
     char header[64];
-    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1; // +1 for \0
+    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, len);
+    header[hlen] = '\0';
+    hlen += 1;  // include null terminator
 
-    // 3. Combine header + data into one buffer
+    // 3. Combine header + data
     size_t total = hlen + len;
     uint8_t *full = malloc(total);
     if (!full) return -1;
+
     memcpy(full, header, hlen);
     memcpy(full + hlen, data, len);
 
-    // 4. Compute SHA-256 of the full buffer
+    // 4. Compute hash
     compute_hash(full, total, id_out);
 
-    // 5. Deduplication: if already exists, done
-    if (object_exists(id_out)) { free(full); return 0; }
+    // 5. Deduplication
+    if (object_exists(id_out)) {
+        free(full);
+        return 0;
+    }
 
-    // 6. Get the target path and create shard directory
+    // 6. Get final path
     char path[512];
     object_path(id_out, path, sizeof(path));
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s/%.2s", OBJECTS_DIR,
-             /* first 2 chars of hex */ (char[3]){0}); // see below
-    // Better: extract dir from path
-    char dir2[512];
-    strncpy(dir2, path, sizeof(dir2));
-    char *slash = strrchr(dir2, '/');
-    if (slash) *slash = '\0';
-    mkdir(dir2, 0755); // ok if already exists
 
-    // 7. Write to temp file, fsync, rename
+    // 7. Extract directory path
+    char dir[512];
+    strncpy(dir, path, sizeof(dir));
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = '\0';
+
+    mkdir(dir, 0755);  // ok if already exists
+
+    // 8. Temp file path
     char tmp[520];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+    // 9. Write file
     int fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) { free(full); return -1; }
-    write(fd, full, total);
+    if (fd < 0) {
+        free(full);
+        return -1;
+    }
+
+    if (write(fd, full, total) != total) {
+        close(fd);
+        free(full);
+        return -1;
+    }
+
     fsync(fd);
     close(fd);
     free(full);
 
-    // 8. Atomic rename
+    // 10. Atomic rename
     if (rename(tmp, path) != 0) return -1;
 
-    // 9. fsync the directory to persist the rename
-    int dfd = open(dir2, O_RDONLY);
-    if (dfd >= 0) { fsync(dfd); close(dfd); }
+    // 11. fsync directory
+    int dfd = open(dir, O_RDONLY);
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
 
     return 0;
 }
