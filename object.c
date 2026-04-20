@@ -1,19 +1,4 @@
-None selected
 
-Skip to content
-Using Gmail with screen readers
-1 of 1,830
-(no subject)
-Inbox
-
-Gunda Hegde <gundahegde1@gmail.com>
-Attachments
-10:13 (1 minute ago)
-to me
-
-
- 5 attachment
-  •  Scanned by Gmail
 // object.c — Content-addressable object store
 //
 // Every piece of data (file contents, directory listings, commits) is stored
