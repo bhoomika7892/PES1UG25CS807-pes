@@ -95,45 +95,73 @@ int object_exists(const ObjectID *id) {
 // Returns 0 on success, -1 on error.
 
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // Build the type string
+    // Build type string
     const char *type_str = (type == OBJ_BLOB) ? "blob" :
                            (type == OBJ_TREE) ? "tree" : "commit";
 
-    //Build the header: "blob 42\0"
+    // Build header correctly
     char header[64];
-    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1; // +1 for \0
+    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, len);
+    header[hlen] = '\0';
+    hlen += 1;   // include null terminator
 
-    //Combine header + data into one buffer
+    // Combine header + data
     size_t total = hlen + len;
     uint8_t *full = malloc(total);
     if (!full) return -1;
+
     memcpy(full, header, hlen);
     memcpy(full + hlen, data, len);
 
-    // Compute SHA-256 of the full buffer
+    // Compute hash
     compute_hash(full, total, id_out);
 
-    // Deduplication: if already exists, done
-    if (object_exists(id_out)) { free(full); return 0; }
+    // Deduplication
+    if (object_exists(id_out)) {
+        free(full);
+        return 0;
+    }
 
-    // Get the target path and create shard directory
+    // Ensure base directories exist
+    mkdir(".pes", 0755);
+    mkdir(".pes/objects", 0755);
+
+    // Get full path
     char path[512];
     object_path(id_out, path, sizeof(path));
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s/%.2s", OBJECTS_DIR , (char[3]){0}); // see below
-    // Better: extract dir from path
-    char dir2[512];
-    strncpy(dir2, path, sizeof(dir2));
-    char *slash = strrchr(dir2, '/');
-    if (slash) *slash = '\0';
-    mkdir(dir2, 0755); // ok if already exists
 
-    // Write to temp file, fsync, rename
+    // Extract directory safely
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s", path);
+
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        free(full);
+        return -1;
+    }
+    *slash = '\0';
+
+    // Create shard directory
+    mkdir(dir, 0755);
+
+    // Temp file
     char tmp[520];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
     int fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) { free(full); return -1; }
-    write(fd, full, total);
+    if (fd < 0) {
+        free(full);
+        return -1;
+    }
+
+    // Safe write
+    ssize_t written = write(fd, full, total);
+    if (written != total) {
+        close(fd);
+        free(full);
+        return -1;
+    }
+
     fsync(fd);
     close(fd);
     free(full);
@@ -141,9 +169,12 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     // Atomic rename
     if (rename(tmp, path) != 0) return -1;
 
-    //  fsync the directory to persist the rename
-    int dfd = open(dir2, O_RDONLY);
-    if (dfd >= 0) { fsync(dfd); close(dfd); }
+    // fsync directory
+    int dfd = open(dir, O_RDONLY);
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
 
     return 0;
 }
