@@ -1,19 +1,4 @@
-None selected
 
-Skip to content
-Using Gmail with screen readers
-1 of 1,830
-(no subject)
-Inbox
-
-Gunda Hegde <gundahegde1@gmail.com>
-Attachments
-10:13 (0 minutes ago)
-to me
-
-
- 5 attachment
-  •  Scanned by Gmail
 // index.c — Staging area implementation
 //
 // Text format of .pes/index (one entry per line, sorted by path):
